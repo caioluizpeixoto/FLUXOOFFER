@@ -1,0 +1,24 @@
+[
+  {
+    "key": "fo_live_admin_master88",
+    "userName": "Caio (Admin)",
+    "userEmail": "caio@fluxooffer.com",
+    "role": "admin",
+    "createdAt": "2026-09-20T20:05:04.657Z"
+  },
+  {
+    "key": "fo_live_miner_joao42",
+    "userName": "João (Minerador)",
+    "userEmail": "joao.miner@gmail.com",
+    "role": "miner",
+    "createdAt": "2026-09-17T20:05:04.657Z",
+    "lastUsedAt": "2026-09-20T20:06:22.369Z"
+  },
+  {
+    "key": "fo_live_miner_maria19",
+    "userName": "Maria (Copywriter)",
+    "userEmail": "maria.copy@gmail.com",
+    "role": "miner",
+    "createdAt": "2026-09-13T20:05:04.657Z"
+  }
+]
