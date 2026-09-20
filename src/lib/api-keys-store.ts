@@ -11,8 +11,10 @@ export interface ApiKey {
   lastUsedAt?: string;
 }
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const isServerless = process.env.VERCEL === "1" || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+const DATA_DIR = isServerless ? "/tmp" : path.join(process.cwd(), "data");
 const KEYS_FILE = path.join(DATA_DIR, "api-keys.json");
+const BUNDLED_FILE = path.join(process.cwd(), "data", "api-keys.json");
 
 const SEED_KEYS: ApiKey[] = [
   {
@@ -44,7 +46,15 @@ async function ensureKeysFile(): Promise<void> {
     try {
       await fs.access(KEYS_FILE);
     } catch {
-      await fs.writeFile(KEYS_FILE, JSON.stringify(SEED_KEYS, null, 2), "utf-8");
+      let initialData = SEED_KEYS;
+      try {
+        const bundledRaw = await fs.readFile(BUNDLED_FILE, "utf-8");
+        const parsed = JSON.parse(bundledRaw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          initialData = parsed;
+        }
+      } catch {}
+      await fs.writeFile(KEYS_FILE, JSON.stringify(initialData, null, 2), "utf-8");
     }
   } catch (err) {
     console.error("Erro ao inicializar arquivo de chaves:", err);

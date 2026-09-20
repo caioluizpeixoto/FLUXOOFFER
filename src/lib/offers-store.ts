@@ -32,8 +32,10 @@ export interface SavedAd {
   savedAt: string;
 }
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const isServerless = process.env.VERCEL === "1" || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+const DATA_DIR = isServerless ? "/tmp" : path.join(process.cwd(), "data");
 const DATA_FILE = path.join(DATA_DIR, "offers.json");
+const BUNDLED_FILE = path.join(process.cwd(), "data", "offers.json");
 
 const SEED_OFFERS: SavedAd[] = [
   {
@@ -61,6 +63,7 @@ const SEED_OFFERS: SavedAd[] = [
     folder: "Alta Escala",
     tags: ["vsl", "black", "promessa-forte", "ritual"],
     notes: "Oferta rodando há mais de 2 meses com 24 variações ativas. VSL muito bem estruturada com lead curiosa.",
+    savedBy: "Caio (Admin)",
     savedAt: new Date(Date.now() - 3600000 * 24 * 2).toISOString(),
   },
   {
@@ -88,6 +91,7 @@ const SEED_OFFERS: SavedAd[] = [
     folder: "Dropshipping",
     tags: ["direto", "antes-depois", "ugc"],
     notes: "UGC com alta conversão, modelo direto ao ponto com gatilho de escassez e frete grátis.",
+    savedBy: "Caio (Admin)",
     savedAt: new Date(Date.now() - 3600000 * 24 * 5).toISOString(),
   },
   {
@@ -115,6 +119,7 @@ const SEED_OFFERS: SavedAd[] = [
     folder: "Infoproduto",
     tags: ["lead", "captura", "aula-gratuita"],
     notes: "Gancho focado em economia de ferramentas pagas. Ótima copy de quebra de objeção.",
+    savedBy: "Caio (Admin)",
     savedAt: new Date(Date.now() - 3600000 * 12).toISOString(),
   },
 ];
@@ -125,7 +130,17 @@ async function ensureDataFile(): Promise<void> {
     try {
       await fs.access(DATA_FILE);
     } catch {
-      await fs.writeFile(DATA_FILE, JSON.stringify(SEED_OFFERS, null, 2), "utf-8");
+      let initialData = SEED_OFFERS;
+      try {
+        const bundledRaw = await fs.readFile(BUNDLED_FILE, "utf-8");
+        const parsed = JSON.parse(bundledRaw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          initialData = parsed;
+        }
+      } catch {
+        // Usa SEED_OFFERS padrão
+      }
+      await fs.writeFile(DATA_FILE, JSON.stringify(initialData, null, 2), "utf-8");
     }
   } catch (err) {
     console.error("Erro ao garantir arquivo de dados do cofre:", err);
@@ -190,10 +205,8 @@ export async function saveOffer(ad: Partial<SavedAd> & { advertiserName?: string
   );
 
   if (existingIdx >= 0) {
-    // Atualiza mantendo dados
     list[existingIdx] = { ...list[existingIdx], ...newAd };
   } else {
-    // Adiciona no topo
     list.unshift(newAd);
   }
 

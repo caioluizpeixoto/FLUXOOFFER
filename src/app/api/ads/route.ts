@@ -110,10 +110,13 @@ export async function POST(request: NextRequest) {
       },
       { status: 201, headers: corsHeaders }
     );
-  } catch (error) {
+  } catch (error: any) {
     console.error("Erro ao salvar anúncio:", error);
     return NextResponse.json(
-      { success: false, message: "Erro ao processar e salvar anúncio." },
+      {
+        success: false,
+        message: error?.message || "Erro ao processar e salvar anúncio.",
+      },
       { status: 500, headers: corsHeaders }
     );
   }
