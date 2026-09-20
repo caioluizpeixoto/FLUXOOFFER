@@ -18,25 +18,18 @@ const BUNDLED_FILE = path.join(process.cwd(), "data", "api-keys.json");
 
 const SEED_KEYS: ApiKey[] = [
   {
-    key: "fo_live_admin_master88",
+    key: "fo_live_caio_master",
     userName: "Caio (Admin)",
     userEmail: "caio@fluxooffer.com",
     role: "admin",
     createdAt: new Date().toISOString(),
   },
   {
-    key: "fo_live_miner_joao42",
-    userName: "João (Minerador)",
-    userEmail: "joao.miner@gmail.com",
-    role: "miner",
-    createdAt: new Date(Date.now() - 3600000 * 24 * 3).toISOString(),
-  },
-  {
-    key: "fo_live_miner_maria19",
-    userName: "Maria (Copywriter)",
-    userEmail: "maria.copy@gmail.com",
-    role: "miner",
-    createdAt: new Date(Date.now() - 3600000 * 24 * 7).toISOString(),
+    key: "fo_live_admin_master88",
+    userName: "Caio (Admin Master)",
+    userEmail: "caio@fluxooffer.com",
+    role: "admin",
+    createdAt: new Date().toISOString(),
   },
 ];
 
