@@ -375,7 +375,7 @@ export default function SwipeFilePage() {
           {/* Connection Badge */}
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-950/60 border border-emerald-800/50 text-emerald-400 text-xs font-medium">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>FluxoMiner Conectado (API :3000)</span>
+            <span>FluxoMiner Conectado (API Online)</span>
           </div>
 
           <button
