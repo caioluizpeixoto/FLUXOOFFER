@@ -55,20 +55,66 @@ interface VaultAd {
   copy?: string;
 }
 
-// Extrai a faixa de áudio de qualquer arquivo de vídeo/áudio e reamostra para 16kHz mono (padrão Whisper)
-async function extractAudioFromMediaFile(
+// Converte um AudioBuffer do navegador em um Blob de arquivo .wav 16-bit PCM padrão
+function audioBufferToWav(buffer: AudioBuffer): Blob {
+  const numChannels = 1;
+  const sampleRate = buffer.sampleRate;
+  const format = 1; // PCM
+  const bitDepth = 16;
+  const bytesPerSample = bitDepth / 8;
+  const blockAlign = numChannels * bytesPerSample;
+
+  const data = buffer.getChannelData(0);
+  const dataLength = data.length * bytesPerSample;
+  const bufferLength = 44 + dataLength;
+
+  const arrayBuffer = new ArrayBuffer(bufferLength);
+  const view = new DataView(arrayBuffer);
+
+  function writeString(offset: number, str: string) {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  }
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataLength, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, format, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitDepth, true);
+  writeString(36, "data");
+  view.setUint32(40, dataLength, true);
+
+  let offset = 44;
+  for (let i = 0; i < data.length; i++) {
+    const s = Math.max(-1, Math.min(1, data[i]));
+    const int16 = s < 0 ? s * 0x8000 : s * 0x7fff;
+    view.setInt16(offset, int16, true);
+    offset += 2;
+  }
+
+  return new Blob([arrayBuffer], { type: "audio/wav" });
+}
+
+// Extrai a trilha de áudio do arquivo de vídeo usando Web Audio API nativo e reamostra para 16kHz mono (ideal para Whisper)
+async function extractAudioWavFromMedia(
   fileOrBlob: Blob,
   onProgress?: (msg: string) => void
-): Promise<Float32Array> {
-  onProgress?.("Decodificando trilha sonora do vídeo...");
+): Promise<Blob> {
+  onProgress?.("Decodificando trilha de áudio do vídeo...");
   const arrayBuffer = await fileOrBlob.arrayBuffer();
   const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
   const audioCtx = new AudioCtx();
 
   const decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
 
-  onProgress?.("Reamostrando áudio para alta fidelidade (16kHz)...");
-  // Converte para 16kHz mono para máxima precisão de transcrição
+  onProgress?.("Otimizando áudio para IA Whisper (16kHz mono)...");
   const targetSampleRate = 16000;
   const offlineCtx = new OfflineAudioContext(
     1,
@@ -82,7 +128,8 @@ async function extractAudioFromMediaFile(
   source.start(0);
 
   const renderedBuffer = await offlineCtx.startRendering();
-  return renderedBuffer.getChannelData(0);
+  onProgress?.("Formatando áudio em alta fidelidade...");
+  return audioBufferToWav(renderedBuffer);
 }
 
 export default function VslTranscriber() {
@@ -235,7 +282,7 @@ export default function VslTranscriber() {
   };
 
   // ==============================================================
-  // TRANSCRIÇÃO REAL DA VOZ DO VÍDEO (SPEECH-TO-TEXT DIRETO NO NAVEGADOR)
+  // TRANSCRIÇÃO REAL DA VOZ DO VÍDEO (SPEECH-TO-TEXT DIRETO E GRATUITO)
   // Converte a voz que está sendo falada no vídeo em texto palavra por palavra!
   // ==============================================================
   const handleTranscribeAudioTrackDirectly = async () => {
@@ -250,7 +297,7 @@ export default function VslTranscriber() {
 
       // Se for uma URL remota (do cofre de ofertas), faz o fetch do blob
       if (!mediaBlob && filePreviewUrl) {
-        setTranscribeStatus("Baixando áudio da oferta salva...");
+        setTranscribeStatus("Baixando mídia do vídeo salvo...");
         const res = await fetch(filePreviewUrl);
         mediaBlob = await res.blob();
       }
@@ -259,61 +306,49 @@ export default function VslTranscriber() {
         throw new Error("Nenhum arquivo de vídeo disponível para transcrever.");
       }
 
-      // 1. Extrai a faixa de áudio e transforma em dados PCM 16kHz
-      const audioData = await extractAudioFromMediaFile(mediaBlob, (msg) => {
-        setTranscribeStatus(msg);
-      });
-
-      setTranscribeStatus("Carregando modelo de IA Whisper (Hugging Face / OpenAI)...");
-
-      // 2. Importa Transformers.js dinamicamente no cliente
-      const { pipeline, env } = await import("@xenova/transformers");
-      env.allowLocalModels = false;
-      env.useBrowserCache = true;
-
-      // Utiliza whisper-tiny em português (rápido, leve e com 0 custo)
-      const transcriber = await pipeline(
-        "automatic-speech-recognition",
-        "Xenova/whisper-tiny",
-        {
-          progress_callback: (progress: any) => {
-            if (progress.status === "progress") {
-              const pct = Math.round((progress.loaded / progress.total) * 100) || 0;
-              setTranscribeStatus(`Baixando motor de fala: ${pct}%`);
-            } else if (progress.status === "ready") {
-              setTranscribeStatus("Motor de IA pronto! Transcrevendo fala do vídeo...");
-            }
-          },
-        }
-      );
-
-      setTranscribeStatus("Transcrevendo a voz falada no vídeo para texto...");
-
-      // 3. Executa a transcrição
-      const output = await transcriber(audioData, {
-        language: "portuguese",
-        task: "transcribe",
-        chunk_length_s: 30,
-        stride_length_s: 5,
-      });
-
-      const extractedSpokenText = Array.isArray(output)
-        ? output.map((item: any) => item.text).join(" ")
-        : (output as any).text || "";
-
-      if (!extractedSpokenText || extractedSpokenText.trim().length === 0) {
-        throw new Error(
-          "Não foi possível identificar falas claras no áudio deste vídeo. Verifique se o vídeo possui locução audível."
-        );
+      // 1. Extrai a faixa de áudio e transforma em dados WAV 16kHz via Web Audio API do navegador
+      let audioBlobToSend: Blob = mediaBlob;
+      try {
+        audioBlobToSend = await extractAudioWavFromMedia(mediaBlob, (msg) => {
+          setTranscribeStatus(msg);
+        });
+      } catch (audioErr) {
+        console.warn("Extração de áudio direta via Web Audio API falhou, enviando arquivo original...", audioErr);
+        // Fallback: se o navegador falhar na decodificação do container, envia o arquivo original para o servidor processar com ffmpeg
+        audioBlobToSend = mediaBlob;
       }
 
-      setTranscribeStatus("Transcrição concluída com sucesso!");
-      structureTranscript(extractedSpokenText, title || selectedFile?.name);
+      setTranscribeStatus("Processando fala com IA Whisper (Português)...");
+
+      // 2. Envia para o motor de transcrição Whisper no servidor
+      const formData = new FormData();
+      const sendFilename = audioBlobToSend.type.includes("wav")
+        ? "audio_vsl.wav"
+        : selectedFile?.name || "video.mp4";
+      formData.append("file", audioBlobToSend, sendFilename);
+
+      if (openAiKey.trim()) {
+        formData.append("apiKey", openAiKey.trim());
+      }
+
+      const res = await fetch("/api/transcribe-file", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Não foi possível transcrever a fala deste vídeo.");
+      }
+
+      setTranscribeStatus("Fala do vídeo transcrita com sucesso!");
+      structureTranscript(data.transcript, title || selectedFile?.name);
     } catch (err: any) {
-      console.error("Erro na transcrição local:", err);
+      console.error("Erro na transcrição:", err);
       setErrorMessage(
         err.message ||
-          "Erro ao transcrever a voz do vídeo no navegador. Se o vídeo for muito longo, experimente utilizar a Opção de IA na Nuvem (Whisper API)."
+          "Erro ao transcrever a voz do vídeo. Verifique se o vídeo possui locução audível ou experimente a opção de transcrição via nuvem."
       );
     } finally {
       setIsTranscribing(false);
@@ -326,7 +361,7 @@ export default function VslTranscriber() {
 
     setIsTranscribing(true);
     setErrorMessage(null);
-    setTranscribeStatus("Enviando arquivo para API Whisper na Nuvem...");
+    setTranscribeStatus("Preparando áudio para API Whisper na Nuvem...");
 
     try {
       let fileToSend: File | Blob | null = selectedFile;
@@ -340,12 +375,20 @@ export default function VslTranscriber() {
         throw new Error("Nenhum arquivo válido para transcrever.");
       }
 
+      try {
+        const wavBlob = await extractAudioWavFromMedia(fileToSend, (msg) => setTranscribeStatus(msg));
+        fileToSend = wavBlob;
+      } catch (e) {
+        // use original file
+      }
+
       const formData = new FormData();
-      formData.append("file", fileToSend);
+      formData.append("file", fileToSend, "audio_vsl.wav");
       if (openAiKey.trim()) {
         formData.append("apiKey", openAiKey.trim());
       }
 
+      setTranscribeStatus("Transcrevendo com OpenAI Whisper na Nuvem...");
       const res = await fetch("/api/transcribe-file", {
         method: "POST",
         body: formData,
@@ -573,6 +616,25 @@ export default function VslTranscriber() {
                       onChange={handleFileChange}
                       className="hidden"
                     />
+
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        setSelectedFile(null);
+                        setFilePreviewUrl("/sample_vsl.mp4");
+                        setTitle("Apresentação de Vendas (Exemplo de Demonstração)");
+                        setIsVideoFile(true);
+                        setErrorMessage(null);
+                        setTranscriptAudio("");
+                        setFullTranscript("");
+                        setPillars(null);
+                      }}
+                      className="gap-2 text-xs h-11 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10 rounded-xl"
+                    >
+                      <Play className="h-4 w-4 text-emerald-400" />
+                      Testar com Vídeo Demo
+                    </Button>
 
                     {vaultVideos.length > 0 && (
                       <Button
