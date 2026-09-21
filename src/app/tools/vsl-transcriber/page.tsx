@@ -21,6 +21,13 @@ import {
   Loader2,
   AlertCircle,
   ExternalLink,
+  Upload,
+  FileVideo,
+  FileAudio,
+  Play,
+  Pause,
+  Key,
+  HelpCircle,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -34,11 +41,22 @@ interface StructuredPillars {
 }
 
 export default function VslTranscriber() {
-  const [activeTab, setActiveTab] = useState("youtube");
+  const [activeTab, setActiveTab] = useState("upload");
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [rawText, setRawText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Upload de arquivo local (vídeo/áudio da máquina)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [filePreviewUrl, setFilePreviewUrl] = useState<string | null>(null);
+  const [isVideoFile, setIsVideoFile] = useState<boolean>(true);
+  const [openAiKey, setOpenAiKey] = useState<string>("");
+  const [showKeyInput, setShowKeyInput] = useState<boolean>(false);
+  const [isTranscribingFile, setIsTranscribingFile] = useState<boolean>(false);
+  const [isPlayingSync, setIsPlayingSync] = useState<boolean>(false);
+  const videoPlayerRef = useRef<HTMLVideoElement | null>(null);
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
 
   // Áudio ao vivo via Web Speech API
   const [isRecording, setIsRecording] = useState(false);
@@ -51,7 +69,15 @@ export default function VslTranscriber() {
   const [pillars, setPillars] = useState<StructuredPillars | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // Configura Web Speech API para gravação de áudio
+  // Carrega chave OpenAI salva no localStorage se houver
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const savedKey = localStorage.getItem("fluxooffer_openai_key");
+      if (savedKey) setOpenAiKey(savedKey);
+    }
+  }, []);
+
+  // Configura Web Speech API para gravação de áudio e sincronização
   useEffect(() => {
     if (typeof window !== "undefined") {
       const SpeechRecognition =
@@ -68,22 +94,117 @@ export default function VslTranscriber() {
           for (let i = 0; i < event.results.length; i++) {
             currentTranscript += event.results[i][0].transcript + " ";
           }
-          setTranscriptAudio(currentTranscript.trim());
+          setTranscriptAudio((prev) => {
+            const trimmed = currentTranscript.trim();
+            return trimmed.length > 0 ? trimmed : prev;
+          });
         };
 
         recognition.onerror = (event: any) => {
           console.error("Speech recognition error:", event.error);
           setIsRecording(false);
+          setIsPlayingSync(false);
         };
 
         recognition.onend = () => {
           setIsRecording(false);
+          setIsPlayingSync(false);
         };
 
         recognitionRef.current = recognition;
       }
     }
   }, []);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Libera URL anterior se houver
+    if (filePreviewUrl) {
+      window.URL.revokeObjectURL(filePreviewUrl);
+    }
+
+    const objectUrl = window.URL.createObjectURL(file);
+    setSelectedFile(file);
+    setFilePreviewUrl(objectUrl);
+    setIsVideoFile(file.type.startsWith("video/") || !file.type.startsWith("audio/"));
+    setErrorMessage(null);
+    setTranscriptAudio("");
+  };
+
+  const handleOpenAiKeyChange = (val: string) => {
+    setOpenAiKey(val);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("fluxooffer_openai_key", val);
+    }
+  };
+
+  // Transcrição de arquivo via API (OpenAI Whisper)
+  const handleTranscribeWithWhisper = async () => {
+    if (!selectedFile) return;
+
+    setIsTranscribingFile(true);
+    setErrorMessage(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      if (openAiKey.trim()) {
+        formData.append("apiKey", openAiKey.trim());
+      }
+
+      const res = await fetch("/api/transcribe-file", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        if (data.needsApiKey) {
+          setShowKeyInput(true);
+        }
+        throw new Error(data.error || "Falha ao processar arquivo no servidor.");
+      }
+
+      structureTranscript(data.transcript, selectedFile.name);
+    } catch (err: any) {
+      setErrorMessage(err.message || "Erro ao processar arquivo.");
+    } finally {
+      setIsTranscribingFile(false);
+    }
+  };
+
+  // Transcrição por reprodução do vídeo sincronizado com Web Speech
+  const togglePlaySync = () => {
+    if (!recognitionRef.current) {
+      alert("Seu navegador não suporta reconhecimento de voz direto. Recomendamos o Google Chrome ou Edge.");
+      return;
+    }
+
+    const mediaElement = isVideoFile ? videoPlayerRef.current : audioPlayerRef.current;
+    if (!mediaElement) return;
+
+    if (isPlayingSync) {
+      mediaElement.pause();
+      recognitionRef.current.stop();
+      setIsPlayingSync(false);
+    } else {
+      mediaElement.play();
+      try {
+        recognitionRef.current.start();
+      } catch {}
+      setIsPlayingSync(true);
+
+      mediaElement.onended = () => {
+        setIsPlayingSync(false);
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      };
+    }
+  };
 
   const toggleRecording = () => {
     if (!recognitionRef.current) {
@@ -116,11 +237,6 @@ export default function VslTranscriber() {
     if (totalWords < 50) {
       hookWords = words;
     } else {
-      // Proporções clássicas de VSL de alta conversão:
-      // Hook: primeiros ~15%
-      // História & Mecanismo: ~15% a 60%
-      // Oferta: ~60% a 85%
-      // CTA & Garantia: ~85% a 100%
       const hookEnd = Math.floor(totalWords * 0.15);
       const storyEnd = Math.floor(totalWords * 0.6);
       const offerEnd = Math.floor(totalWords * 0.85);
@@ -177,7 +293,7 @@ export default function VslTranscriber() {
 
   const handleApplyAudioTranscript = () => {
     if (!transcriptAudio.trim()) return;
-    structureTranscript(transcriptAudio, "Gravação de Áudio");
+    structureTranscript(transcriptAudio, selectedFile ? selectedFile.name : "Gravação de Áudio");
   };
 
   const copyToClipboard = async (text: string, key: string) => {
@@ -211,7 +327,13 @@ export default function VslTranscriber() {
 
   // Métricas
   const totalWords = fullTranscript ? fullTranscript.split(/\s+/).filter(Boolean).length : 0;
-  const estimatedReadingMinutes = Math.max(1, Math.round(totalWords / 145)); // ~145 palavras/min ritmo de fala
+  const estimatedReadingMinutes = Math.max(1, Math.round(totalWords / 145));
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
 
   return (
     <div className="p-6 md:p-8 max-w-6xl mx-auto space-y-8">
@@ -221,12 +343,12 @@ export default function VslTranscriber() {
           <div className="flex items-center gap-2">
             <h1 className="text-3xl font-bold tracking-tight">Transcritor de VSL & Anúncios</h1>
             <Badge variant="outline" className="bg-blue-500/10 text-blue-400 border-blue-500/30">
-              Pilares Automáticos
+              Upload de Vídeo Local
             </Badge>
           </div>
           <p className="text-muted-foreground mt-2 max-w-2xl">
-            Extraia roteiros completos de vídeos de vendas, grave áudios ao vivo ou insira textos brutos.
-            O sistema divide automaticamente a VSL em Gancho, História, Mecanismo Único e Oferta.
+            Suba vídeos direto do seu computador (.mp4, .mov, .webm), importe links do YouTube ou grave áudios ao vivo.
+            O sistema extrai a fala e divide automaticamente nos 4 pilares: Gancho, História, Mecanismo e Oferta.
           </p>
         </div>
       </div>
@@ -236,25 +358,226 @@ export default function VslTranscriber() {
         <CardHeader className="pb-3">
           <CardTitle className="text-lg">Selecione o Método de Entrada</CardTitle>
           <CardDescription>
-            Escolha como deseja carregar ou transcrever o roteiro do vídeo.
+            Envie um vídeo da sua máquina, informe um link do YouTube ou use a gravação ao vivo.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-            <TabsList className="grid grid-cols-3 max-w-md bg-muted/60">
+            <TabsList className="grid grid-cols-2 sm:grid-cols-4 max-w-2xl bg-muted/60">
+              <TabsTrigger value="upload" className="gap-1.5 text-xs sm:text-sm font-medium">
+                <Upload className="h-4 w-4 text-emerald-400" />
+                Subir Vídeo Local
+              </TabsTrigger>
               <TabsTrigger value="youtube" className="gap-1.5 text-xs sm:text-sm">
                 <Video className="h-4 w-4 text-red-500" />
                 Link YouTube
               </TabsTrigger>
               <TabsTrigger value="audio" className="gap-1.5 text-xs sm:text-sm">
-                <Mic className="h-4 w-4 text-emerald-500" />
-                Gravar Áudio
+                <Mic className="h-4 w-4 text-blue-500" />
+                Gravar Microfone
               </TabsTrigger>
               <TabsTrigger value="paste" className="gap-1.5 text-xs sm:text-sm">
                 <FileText className="h-4 w-4 text-orange-500" />
                 Colar Roteiro
               </TabsTrigger>
             </TabsList>
+
+            {/* Upload Video/Audio Tab */}
+            <TabsContent value="upload" className="space-y-5 pt-2">
+              {!selectedFile ? (
+                <div className="p-8 rounded-xl border-2 border-dashed border-border hover:border-emerald-500/50 transition-all bg-muted/10 text-center flex flex-col items-center justify-center space-y-4">
+                  <div className="w-16 h-16 rounded-full bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+                    <FileVideo className="h-8 w-8" />
+                  </div>
+                  <div className="space-y-1">
+                    <h4 className="font-semibold text-base">Selecione ou arraste o vídeo da sua máquina</h4>
+                    <p className="text-xs text-muted-foreground max-w-md">
+                      Suporta arquivos de vídeo (.mp4, .mov, .webm, .mkv, .avi) e áudio (.mp3, .wav, .m4a).
+                    </p>
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="vsl-file-upload"
+                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm cursor-pointer shadow-md transition-all"
+                    >
+                      <Upload className="h-4 w-4" />
+                      Escolher Arquivo do Computador
+                    </label>
+                    <input
+                      id="vsl-file-upload"
+                      type="file"
+                      accept="video/*,audio/*,.mp4,.mov,.webm,.mkv,.avi,.mp3,.wav,.m4a"
+                      onChange={handleFileChange}
+                      className="hidden"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Informações do Arquivo */}
+                  <div className="p-4 rounded-xl border border-border bg-card flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2.5 rounded-lg bg-emerald-500/10 text-emerald-400">
+                        {isVideoFile ? <FileVideo className="h-6 w-6" /> : <FileAudio className="h-6 w-6" />}
+                      </div>
+                      <div>
+                        <h4 className="font-semibold text-sm line-clamp-1">{selectedFile.name}</h4>
+                        <p className="text-xs text-muted-foreground font-mono">
+                          {formatFileSize(selectedFile.size)} • {selectedFile.type || "Arquivo de Mídia"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label
+                        htmlFor="vsl-file-upload-replace"
+                        className="text-xs text-muted-foreground hover:text-foreground underline cursor-pointer px-2 py-1"
+                      >
+                        Trocar arquivo
+                      </label>
+                      <input
+                        id="vsl-file-upload-replace"
+                        type="file"
+                        accept="video/*,audio/*,.mp4,.mov,.webm,.mkv,.avi,.mp3,.wav,.m4a"
+                        onChange={handleFileChange}
+                        className="hidden"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Player de Prévia */}
+                  {filePreviewUrl && (
+                    <div className="rounded-xl overflow-hidden border border-border bg-black/80 flex justify-center max-h-[360px]">
+                      {isVideoFile ? (
+                        <video
+                          ref={videoPlayerRef}
+                          controls
+                          src={filePreviewUrl}
+                          className="max-h-[360px] w-auto rounded-lg shadow-lg"
+                        />
+                      ) : (
+                        <div className="p-6 w-full flex items-center justify-center">
+                          <audio ref={audioPlayerRef} controls src={filePreviewUrl} className="w-full max-w-lg" />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Ações de Transcrição */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                    {/* Opção 1: Reconhecimento de Voz ao Vivo (Gratuito) */}
+                    <div className="p-5 rounded-xl border border-border bg-card/60 flex flex-col justify-between space-y-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <h5 className="font-semibold text-sm">Opção 1: Reprodução com Voz</h5>
+                          <Badge variant="outline" className="text-[10px] text-emerald-400 bg-emerald-500/10 border-emerald-500/30">
+                            100% Gratuito
+                          </Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          O navegador reproduz o áudio do vídeo e transcreve a fala em tempo real via microfone/áudio do sistema.
+                        </p>
+                      </div>
+
+                      <Button
+                        onClick={togglePlaySync}
+                        variant={isPlayingSync ? "destructive" : "default"}
+                        className="w-full gap-2 font-semibold shadow-sm"
+                      >
+                        {isPlayingSync ? (
+                          <>
+                            <Pause className="h-4 w-4" /> Pausar Transcrição do Vídeo
+                          </>
+                        ) : (
+                          <>
+                            <Play className="h-4 w-4" /> Iniciar Reprodução & Transcrição
+                          </>
+                        )}
+                      </Button>
+                    </div>
+
+                    {/* Opção 2: Transcrição em Segundo Plano com IA (Whisper) */}
+                    <div className="p-5 rounded-xl border border-border bg-card/60 flex flex-col justify-between space-y-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <h5 className="font-semibold text-sm">Opção 2: IA Whisper</h5>
+                            <Badge variant="outline" className="text-[10px] text-blue-400 bg-blue-500/10 border-blue-500/30">
+                              Automático
+                            </Badge>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowKeyInput(!showKeyInput)}
+                            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                          >
+                            <Key className="h-3 w-3" />
+                            {openAiKey ? "Chave salva" : "Configurar API Key"}
+                          </button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Processamento rápido direto do arquivo sem precisar reproduzi-lo na caixa de som.
+                        </p>
+                      </div>
+
+                      {showKeyInput && (
+                        <div className="space-y-1">
+                          <Input
+                            placeholder="sk-... (Chave OpenAI Whisper)"
+                            type="password"
+                            value={openAiKey}
+                            onChange={(e) => handleOpenAiKeyChange(e.target.value)}
+                            className="h-8 text-xs font-mono"
+                          />
+                          <p className="text-[10px] text-muted-foreground">
+                            Sua chave fica salva apenas no seu navegador para uso contínuo.
+                          </p>
+                        </div>
+                      )}
+
+                      <Button
+                        onClick={handleTranscribeWithWhisper}
+                        disabled={isTranscribingFile}
+                        className="w-full gap-2 font-semibold bg-blue-600 hover:bg-blue-500 text-white shadow-sm"
+                      >
+                        {isTranscribingFile ? (
+                          <>
+                            <Loader2 className="h-4 w-4 animate-spin" /> Processando com Whisper...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="h-4 w-4" /> Transcrever com IA Whisper
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Texto Transcrito em Tempo Real / Temporário */}
+                  {transcriptAudio && (
+                    <div className="p-4 rounded-xl border border-border bg-muted/20 space-y-3 mt-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          Texto Capturado do Vídeo:
+                        </span>
+                        <Button
+                          size="sm"
+                          onClick={handleApplyAudioTranscript}
+                          className="h-7 text-xs bg-emerald-600 hover:bg-emerald-500 text-white"
+                        >
+                          <Sparkles className="h-3.5 w-3.5 mr-1" />
+                          Estruturar nos 4 Pilares
+                        </Button>
+                      </div>
+                      <p className="text-xs font-mono text-foreground leading-relaxed max-h-40 overflow-auto">
+                        {transcriptAudio}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </TabsContent>
 
             {/* YouTube Tab */}
             <TabsContent value="youtube" className="space-y-4 pt-2">
@@ -365,7 +688,7 @@ export default function VslTranscriber() {
           {errorMessage && (
             <Alert variant="destructive" className="mt-4">
               <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Não foi possível transcrever</AlertTitle>
+              <AlertTitle>Atenção</AlertTitle>
               <AlertDescription>{errorMessage}</AlertDescription>
             </Alert>
           )}
