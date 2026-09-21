@@ -19,6 +19,9 @@ import {
   FileCheck,
   Video,
   Image as ImageIcon,
+  Archive,
+  FileCode,
+  FolderArchive,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -37,6 +40,7 @@ interface DownloadResult {
 export default function PageDownloader() {
   const [url, setUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isDownloadingZip, setIsDownloadingZip] = useState(false);
   const [result, setResult] = useState<DownloadResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -69,6 +73,46 @@ export default function PageDownloader() {
       setErrorMessage(err.message || "Erro desconhecido ao baixar página.");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Baixa o pacote completo em .ZIP contendo index.html, css/ e images/
+  const handleDownloadZip = async () => {
+    if (!result) return;
+    setIsDownloadingZip(true);
+
+    try {
+      const res = await fetch("/api/download-page-zip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: result.url }),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "Falha ao empacotar arquivo ZIP.");
+      }
+
+      const blob = await res.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const sanitizedTitle = (result.title || "pagina-clonada")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]/g, "-")
+        .slice(0, 35);
+
+      a.href = downloadUrl;
+      a.download = `${sanitizedTitle}-${Date.now()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(downloadUrl);
+    } catch (err: any) {
+      alert(err.message || "Erro ao processar download do pacote ZIP.");
+    } finally {
+      setIsDownloadingZip(false);
     }
   };
 
@@ -121,12 +165,11 @@ export default function PageDownloader() {
           <div className="flex items-center gap-2">
             <h1 className="text-3xl font-bold tracking-tight">Baixador & Clonador de Páginas</h1>
             <Badge variant="outline" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/30">
-              Pronto para Uso
+              Download em .ZIP Completo
             </Badge>
           </div>
           <p className="text-muted-foreground mt-2 max-w-2xl">
-            Clone páginas de vendas e advertoriais para modelagem. Removemos automaticamente pixels de rastreamento
-            (Facebook, TikTok, GTM) mantendo players de vídeo (VTurb, Panda) e estrutura intactos.
+            Clone páginas de vendas e advertoriais para modelagem. Baixe o pacote <strong>.ZIP completo</strong> (HTML, pasta de CSS e pasta de Imagens) pronto para subir na sua hospedagem, com pixels de rastreamento removidos e players de VSL preservados.
           </p>
         </div>
       </div>
@@ -157,7 +200,7 @@ export default function PageDownloader() {
               {isLoading ? (
                 <>
                   <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                  Processando HTML...
+                  Processando Página...
                 </>
               ) : (
                 <>
@@ -170,8 +213,8 @@ export default function PageDownloader() {
 
           {/* Quick tips */}
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground pt-1">
-            <span className="font-medium text-foreground">Dica:</span>
-            <span>Aceita páginas completas de VSL, Webflow, Elementor, Shopify e Hotmart.</span>
+            <span className="font-medium text-foreground">Formatos de Download:</span>
+            <span>Pacote .ZIP com HTML + CSS + Imagens, ou arquivo avulso .HTML.</span>
           </div>
 
           {errorMessage && (
@@ -215,12 +258,16 @@ export default function PageDownloader() {
                     {result.videoLinks.length} player(s) de VSL
                   </Badge>
                 )}
+                <Badge variant="outline" className="gap-1 text-xs text-emerald-400 border-emerald-500/30 bg-emerald-500/10">
+                  <FolderArchive className="h-3.5 w-3.5" />
+                  Pronto para ZIP
+                </Badge>
               </div>
             </CardContent>
           </Card>
 
           {/* Action Toolbar */}
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <Tabs value={activeTab} onValueChange={setActiveTab} className="w-auto">
                 <TabsList className="bg-card border border-border">
@@ -234,7 +281,7 @@ export default function PageDownloader() {
                   </TabsTrigger>
                   <TabsTrigger value="media" className="gap-1.5 text-xs sm:text-sm">
                     <Video className="h-4 w-4" />
-                    Mídias Detectadas ({result.videoLinks.length})
+                    Mídias ({result.videoLinks.length})
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
@@ -261,6 +308,7 @@ export default function PageDownloader() {
               )}
             </div>
 
+            {/* Download Buttons */}
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="outline" size="sm" onClick={handleOpenInNewTab} className="h-9 gap-1.5 text-xs">
                 <ExternalLink className="h-3.5 w-3.5" />
@@ -271,12 +319,31 @@ export default function PageDownloader() {
                 {copied ? "Copiado!" : "Copiar HTML"}
               </Button>
               <Button
+                variant="outline"
                 size="sm"
                 onClick={handleSaveHtmlFile}
-                className="h-9 gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium"
+                className="h-9 gap-1.5 text-xs hover:bg-muted"
               >
-                <Download className="h-3.5 w-3.5" />
-                Baixar Arquivo .html
+                <FileCode className="h-3.5 w-3.5 text-muted-foreground" />
+                Apenas .HTML
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleDownloadZip}
+                disabled={isDownloadingZip}
+                className="h-9 px-4 gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-semibold shadow-md transition-all"
+              >
+                {isDownloadingZip ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Gerando Pacote .ZIP...
+                  </>
+                ) : (
+                  <>
+                    <Archive className="h-3.5 w-3.5" />
+                    Baixar Pacote Completo (.ZIP)
+                  </>
+                )}
               </Button>
             </div>
           </div>
@@ -340,13 +407,15 @@ export default function PageDownloader() {
                 <div className="pt-4 border-t border-border">
                   <h4 className="font-semibold text-sm mb-1 flex items-center gap-2">
                     <Sparkles className="h-4 w-4 text-primary" />
-                    Como Utilizar Esta Página
+                    O que vem dentro do Pacote .ZIP:
                   </h4>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    1. Clique em <strong>Baixar Arquivo .html</strong> para salvar o código limpo no seu computador.<br />
-                    2. Você pode abrir o arquivo diretamente no VS Code, WordPress/Elementor (via importação de template) ou hospedá-lo em qualquer servidor CDN/Vercel/Cloudflare Pages.<br />
-                    3. Lembre-se de substituir os links de checkout dos botões pelo seu link próprio!
-                  </p>
+                  <div className="p-3 rounded-lg bg-muted/30 font-mono text-xs text-muted-foreground space-y-1 mt-2">
+                    <div>📦 <strong>meu-projeto.zip</strong></div>
+                    <div className="pl-4">├── 📄 <strong>index.html</strong> (HTML com links ajustados para pastas locais)</div>
+                    <div className="pl-4">├── 📁 <strong>css/</strong> (todas as folhas de estilo externas baixadas)</div>
+                    <div className="pl-4">├── 📁 <strong>images/</strong> (todas as imagens, logos, banners e favicon)</div>
+                    <div className="pl-4">└── 📄 <strong>LEIA-ME.txt</strong> (instruções de uso e publicação)</div>
+                  </div>
                 </div>
               </div>
             )}
