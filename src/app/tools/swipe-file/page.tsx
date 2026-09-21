@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
 import {
   Flame,
   Clock,
@@ -23,6 +24,7 @@ import {
   X,
   Share2,
   Key,
+  Video,
   User,
   Users,
   Shield,
@@ -727,6 +729,18 @@ export default function SwipeFilePage() {
                         <span>Meta</span>
                         <ExternalLink className="h-3 w-3" />
                       </a>
+                    )}
+
+                    {(ad.creativeUrl || (ad.creativeType && ad.creativeType.toLowerCase().includes("v"))) && (
+                      <Link
+                        href={`/tools/vsl-transcriber?videoUrl=${encodeURIComponent(ad.creativeUrl || "")}&title=${encodeURIComponent(ad.advertiserName || "")}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="px-2.5 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 text-xs rounded-lg flex items-center gap-1 transition border border-emerald-800/40"
+                        title="Transcrever VSL deste anúncio"
+                      >
+                        <Video className="h-3 w-3 text-emerald-400" />
+                        <span>Transcrever VSL</span>
+                      </Link>
                     )}
                   </div>
 

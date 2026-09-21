@@ -27,7 +27,10 @@ import {
   Play,
   Pause,
   Key,
-  HelpCircle,
+  Film,
+  Image as ImageIcon,
+  Layers,
+  ArrowRight,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -40,14 +43,24 @@ interface StructuredPillars {
   cta: string;
 }
 
+interface VaultAd {
+  id: string;
+  advertiserName: string;
+  creativeUrl: string | null;
+  thumbnailUrl: string | null;
+  creativeType: string;
+  niche?: string;
+  copy?: string;
+}
+
 export default function VslTranscriber() {
-  const [activeTab, setActiveTab] = useState("upload");
+  const [activeTab, setActiveTab] = useState("gallery");
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [rawText, setRawText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Upload de arquivo local (vídeo/áudio da máquina)
+  // Upload de arquivo local (vídeo/áudio da galeria ou máquina)
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [filePreviewUrl, setFilePreviewUrl] = useState<string | null>(null);
   const [isVideoFile, setIsVideoFile] = useState<boolean>(true);
@@ -57,6 +70,10 @@ export default function VslTranscriber() {
   const [isPlayingSync, setIsPlayingSync] = useState<boolean>(false);
   const videoPlayerRef = useRef<HTMLVideoElement | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+
+  // Vídeos salvos no Cofre de Ofertas (Galeria Pessoal)
+  const [vaultVideos, setVaultVideos] = useState<VaultAd[]>([]);
+  const [isLoadingVault, setIsLoadingVault] = useState<boolean>(true);
 
   // Áudio ao vivo via Web Speech API
   const [isRecording, setIsRecording] = useState(false);
@@ -69,11 +86,39 @@ export default function VslTranscriber() {
   const [pillars, setPillars] = useState<StructuredPillars | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // Carrega chave OpenAI salva no localStorage se houver
+  // Carrega vídeos do Cofre
+  useEffect(() => {
+    fetch("/api/ads")
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          const vids = data.filter(
+            (ad: any) =>
+              ad.creativeUrl ||
+              (ad.creativeType && ad.creativeType.toLowerCase().includes("v"))
+          );
+          setVaultVideos(vids);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setIsLoadingVault(false));
+  }, []);
+
+  // Carrega chave OpenAI e query params (ex: vindo direto do Cofre)
   useEffect(() => {
     if (typeof window !== "undefined") {
       const savedKey = localStorage.getItem("fluxooffer_openai_key");
       if (savedKey) setOpenAiKey(savedKey);
+
+      const params = new URLSearchParams(window.location.search);
+      const paramVideoUrl = params.get("videoUrl");
+      const paramTitle = params.get("title");
+      if (paramVideoUrl) {
+        setFilePreviewUrl(paramVideoUrl);
+        setTitle(paramTitle || "Vídeo da Galeria");
+        setIsVideoFile(true);
+        setActiveTab("gallery");
+      }
     }
   }, []);
 
@@ -120,17 +165,32 @@ export default function VslTranscriber() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Libera URL anterior se houver
-    if (filePreviewUrl) {
+    if (filePreviewUrl && filePreviewUrl.startsWith("blob:")) {
       window.URL.revokeObjectURL(filePreviewUrl);
     }
 
     const objectUrl = window.URL.createObjectURL(file);
     setSelectedFile(file);
     setFilePreviewUrl(objectUrl);
+    setTitle(file.name);
     setIsVideoFile(file.type.startsWith("video/") || !file.type.startsWith("audio/"));
     setErrorMessage(null);
     setTranscriptAudio("");
+  };
+
+  const handleSelectFromVault = (ad: VaultAd) => {
+    if (!ad.creativeUrl) {
+      alert("Esta oferta não possui link de vídeo direto cadastrado.");
+      return;
+    }
+
+    setSelectedFile(null);
+    setFilePreviewUrl(ad.creativeUrl);
+    setTitle(ad.advertiserName || "Vídeo do Cofre");
+    setIsVideoFile(true);
+    setErrorMessage(null);
+    setTranscriptAudio("");
+    setActiveTab("gallery");
   };
 
   const handleOpenAiKeyChange = (val: string) => {
@@ -142,14 +202,26 @@ export default function VslTranscriber() {
 
   // Transcrição de arquivo via API (OpenAI Whisper)
   const handleTranscribeWithWhisper = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile && !filePreviewUrl) return;
 
     setIsTranscribingFile(true);
     setErrorMessage(null);
 
     try {
+      let fileToSend: File | Blob | null = selectedFile;
+
+      // Se for uma URL remota do cofre, busca o blob primeiro
+      if (!fileToSend && filePreviewUrl) {
+        const fetchedBlob = await fetch(filePreviewUrl).then((r) => r.blob());
+        fileToSend = new File([fetchedBlob], `${title || "video"}.mp4`, { type: "video/mp4" });
+      }
+
+      if (!fileToSend) {
+        throw new Error("Nenhum arquivo ou URL válida para transcrever.");
+      }
+
       const formData = new FormData();
-      formData.append("file", selectedFile);
+      formData.append("file", fileToSend);
       if (openAiKey.trim()) {
         formData.append("apiKey", openAiKey.trim());
       }
@@ -168,7 +240,7 @@ export default function VslTranscriber() {
         throw new Error(data.error || "Falha ao processar arquivo no servidor.");
       }
 
-      structureTranscript(data.transcript, selectedFile.name);
+      structureTranscript(data.transcript, title || selectedFile?.name);
     } catch (err: any) {
       setErrorMessage(err.message || "Erro ao processar arquivo.");
     } finally {
@@ -293,7 +365,7 @@ export default function VslTranscriber() {
 
   const handleApplyAudioTranscript = () => {
     if (!transcriptAudio.trim()) return;
-    structureTranscript(transcriptAudio, selectedFile ? selectedFile.name : "Gravação de Áudio");
+    structureTranscript(transcriptAudio, title || selectedFile?.name || "Gravação de Áudio");
   };
 
   const copyToClipboard = async (text: string, key: string) => {
@@ -325,14 +397,13 @@ export default function VslTranscriber() {
     document.body.removeChild(a);
   };
 
-  // Métricas
   const totalWords = fullTranscript ? fullTranscript.split(/\s+/).filter(Boolean).length : 0;
   const estimatedReadingMinutes = Math.max(1, Math.round(totalWords / 145));
 
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   };
 
   return (
@@ -342,13 +413,13 @@ export default function VslTranscriber() {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-3xl font-bold tracking-tight">Transcritor de VSL & Anúncios</h1>
-            <Badge variant="outline" className="bg-blue-500/10 text-blue-400 border-blue-500/30">
-              Upload de Vídeo Local
+            <Badge variant="outline" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/30">
+              Vídeos da Galeria & Arquivos
             </Badge>
           </div>
           <p className="text-muted-foreground mt-2 max-w-2xl">
-            Suba vídeos direto do seu computador (.mp4, .mov, .webm), importe links do YouTube ou grave áudios ao vivo.
-            O sistema extrai a fala e divide automaticamente nos 4 pilares: Gancho, História, Mecanismo e Oferta.
+            Suba vídeos da sua <strong>Galeria de Fotos/Vídeos</strong> ou arquivos do computador (.mp4, .mov, .webm),
+            selecione criativos salvos no <strong>Cofre</strong> ou importe do YouTube para dissecar nos 4 pilares de conversão.
           </p>
         </div>
       </div>
@@ -358,15 +429,19 @@ export default function VslTranscriber() {
         <CardHeader className="pb-3">
           <CardTitle className="text-lg">Selecione o Método de Entrada</CardTitle>
           <CardDescription>
-            Envie um vídeo da sua máquina, informe um link do YouTube ou use a gravação ao vivo.
+            Escolha um vídeo da sua galeria, do cofre de ofertas, link do YouTube ou gravação direta.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
             <TabsList className="grid grid-cols-2 sm:grid-cols-4 max-w-2xl bg-muted/60">
-              <TabsTrigger value="upload" className="gap-1.5 text-xs sm:text-sm font-medium">
-                <Upload className="h-4 w-4 text-emerald-400" />
-                Subir Vídeo Local
+              <TabsTrigger value="gallery" className="gap-1.5 text-xs sm:text-sm font-medium">
+                <Film className="h-4 w-4 text-emerald-400" />
+                Galeria / Arquivo Local
+              </TabsTrigger>
+              <TabsTrigger value="vault" className="gap-1.5 text-xs sm:text-sm font-medium">
+                <Layers className="h-4 w-4 text-purple-400" />
+                Galeria do Cofre ({vaultVideos.length})
               </TabsTrigger>
               <TabsTrigger value="youtube" className="gap-1.5 text-xs sm:text-sm">
                 <Video className="h-4 w-4 text-red-500" />
@@ -374,69 +449,77 @@ export default function VslTranscriber() {
               </TabsTrigger>
               <TabsTrigger value="audio" className="gap-1.5 text-xs sm:text-sm">
                 <Mic className="h-4 w-4 text-blue-500" />
-                Gravar Microfone
-              </TabsTrigger>
-              <TabsTrigger value="paste" className="gap-1.5 text-xs sm:text-sm">
-                <FileText className="h-4 w-4 text-orange-500" />
-                Colar Roteiro
+                Gravar / Ditado
               </TabsTrigger>
             </TabsList>
 
-            {/* Upload Video/Audio Tab */}
-            <TabsContent value="upload" className="space-y-5 pt-2">
-              {!selectedFile ? (
+            {/* Tab 1: Galeria do Dispositivo / Upload de Vídeo */}
+            <TabsContent value="gallery" className="space-y-5 pt-2">
+              {!filePreviewUrl ? (
                 <div className="p-8 rounded-xl border-2 border-dashed border-border hover:border-emerald-500/50 transition-all bg-muted/10 text-center flex flex-col items-center justify-center space-y-4">
                   <div className="w-16 h-16 rounded-full bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
-                    <FileVideo className="h-8 w-8" />
+                    <Film className="h-8 w-8" />
                   </div>
                   <div className="space-y-1">
-                    <h4 className="font-semibold text-base">Selecione ou arraste o vídeo da sua máquina</h4>
+                    <h4 className="font-semibold text-base">Subir Vídeo da Galeria ou Computador</h4>
                     <p className="text-xs text-muted-foreground max-w-md">
-                      Suporta arquivos de vídeo (.mp4, .mov, .webm, .mkv, .avi) e áudio (.mp3, .wav, .m4a).
+                      Acesse a galeria de vídeos do seu celular ou arquivos do PC (.mp4, .mov, .webm, .mkv, .avi, .mp3).
                     </p>
                   </div>
-                  <div>
+                  <div className="flex flex-wrap items-center justify-center gap-3">
                     <label
-                      htmlFor="vsl-file-upload"
+                      htmlFor="vsl-gallery-upload"
                       className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm cursor-pointer shadow-md transition-all"
                     >
-                      <Upload className="h-4 w-4" />
-                      Escolher Arquivo do Computador
+                      <ImageIcon className="h-4 w-4" />
+                      Abrir Galeria / Escolher Vídeo
                     </label>
                     <input
-                      id="vsl-file-upload"
+                      id="vsl-gallery-upload"
                       type="file"
                       accept="video/*,audio/*,.mp4,.mov,.webm,.mkv,.avi,.mp3,.wav,.m4a"
                       onChange={handleFileChange}
                       className="hidden"
                     />
+
+                    {vaultVideos.length > 0 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setActiveTab("vault")}
+                        className="gap-2 text-xs h-10 border-purple-500/30 text-purple-300 hover:bg-purple-500/10"
+                      >
+                        <Layers className="h-4 w-4 text-purple-400" />
+                        Ver Vídeos do Cofre ({vaultVideos.length})
+                      </Button>
+                    )}
                   </div>
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {/* Informações do Arquivo */}
+                  {/* Informações do Arquivo Selecionado */}
                   <div className="p-4 rounded-xl border border-border bg-card flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                       <div className="p-2.5 rounded-lg bg-emerald-500/10 text-emerald-400">
                         {isVideoFile ? <FileVideo className="h-6 w-6" /> : <FileAudio className="h-6 w-6" />}
                       </div>
                       <div>
-                        <h4 className="font-semibold text-sm line-clamp-1">{selectedFile.name}</h4>
+                        <h4 className="font-semibold text-sm line-clamp-1">{title || selectedFile?.name || "Vídeo Selecionado"}</h4>
                         <p className="text-xs text-muted-foreground font-mono">
-                          {formatFileSize(selectedFile.size)} • {selectedFile.type || "Arquivo de Mídia"}
+                          {selectedFile ? `${formatFileSize(selectedFile.size)} • ${selectedFile.type}` : "Vídeo Carregado da Galeria"}
                         </p>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2">
                       <label
-                        htmlFor="vsl-file-upload-replace"
+                        htmlFor="vsl-gallery-replace"
                         className="text-xs text-muted-foreground hover:text-foreground underline cursor-pointer px-2 py-1"
                       >
-                        Trocar arquivo
+                        Trocar vídeo da galeria
                       </label>
                       <input
-                        id="vsl-file-upload-replace"
+                        id="vsl-gallery-replace"
                         type="file"
                         accept="video/*,audio/*,.mp4,.mov,.webm,.mkv,.avi,.mp3,.wav,.m4a"
                         onChange={handleFileChange}
@@ -446,22 +529,20 @@ export default function VslTranscriber() {
                   </div>
 
                   {/* Player de Prévia */}
-                  {filePreviewUrl && (
-                    <div className="rounded-xl overflow-hidden border border-border bg-black/80 flex justify-center max-h-[360px]">
-                      {isVideoFile ? (
-                        <video
-                          ref={videoPlayerRef}
-                          controls
-                          src={filePreviewUrl}
-                          className="max-h-[360px] w-auto rounded-lg shadow-lg"
-                        />
-                      ) : (
-                        <div className="p-6 w-full flex items-center justify-center">
-                          <audio ref={audioPlayerRef} controls src={filePreviewUrl} className="w-full max-w-lg" />
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  <div className="rounded-xl overflow-hidden border border-border bg-black/90 flex justify-center max-h-[360px]">
+                    {isVideoFile ? (
+                      <video
+                        ref={videoPlayerRef}
+                        controls
+                        src={filePreviewUrl}
+                        className="max-h-[360px] w-auto rounded-lg shadow-lg"
+                      />
+                    ) : (
+                      <div className="p-6 w-full flex items-center justify-center">
+                        <audio ref={audioPlayerRef} controls src={filePreviewUrl} className="w-full max-w-lg" />
+                      </div>
+                    )}
+                  </div>
 
                   {/* Ações de Transcrição */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
@@ -475,7 +556,7 @@ export default function VslTranscriber() {
                           </Badge>
                         </div>
                         <p className="text-xs text-muted-foreground">
-                          O navegador reproduz o áudio do vídeo e transcreve a fala em tempo real via microfone/áudio do sistema.
+                          O navegador reproduz o áudio do vídeo e transcreve a fala em tempo real via microfone ou som do sistema.
                         </p>
                       </div>
 
@@ -553,7 +634,7 @@ export default function VslTranscriber() {
                     </div>
                   </div>
 
-                  {/* Texto Transcrito em Tempo Real / Temporário */}
+                  {/* Texto Transcrito em Tempo Real */}
                   {transcriptAudio && (
                     <div className="p-4 rounded-xl border border-border bg-muted/20 space-y-3 mt-4">
                       <div className="flex items-center justify-between">
@@ -579,7 +660,83 @@ export default function VslTranscriber() {
               )}
             </TabsContent>
 
-            {/* YouTube Tab */}
+            {/* Tab 2: Galeria de Vídeos do Cofre */}
+            <TabsContent value="vault" className="space-y-4 pt-2">
+              <div>
+                <h4 className="text-sm font-semibold mb-1">Vídeos Salvos no seu Cofre de Ofertas</h4>
+                <p className="text-xs text-muted-foreground">
+                  Selecione qualquer criativo ou VSL que você salvou pelo FluxoMiner para transcrever e dissecar imediatamente.
+                </p>
+              </div>
+
+              {isLoadingVault ? (
+                <div className="p-8 text-center text-xs text-muted-foreground flex items-center justify-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Carregando galeria do cofre...
+                </div>
+              ) : vaultVideos.length === 0 ? (
+                <div className="p-8 rounded-xl border border-dashed border-border text-center space-y-2">
+                  <Layers className="h-8 w-8 text-muted-foreground mx-auto" />
+                  <p className="text-sm font-medium">Nenhum vídeo salvo no Cofre ainda</p>
+                  <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                    Quando você minerar anúncios em vídeo com a extensão FluxoMiner, eles aparecerão automaticamente aqui.
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => (window.location.href = "/tools/swipe-file")}
+                    className="text-xs mt-2"
+                  >
+                    Acessar Cofre de Ofertas
+                  </Button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                  {vaultVideos.map((ad) => (
+                    <div
+                      key={ad.id}
+                      onClick={() => handleSelectFromVault(ad)}
+                      className="group p-3 rounded-xl border border-border bg-card hover:border-purple-500/50 hover:bg-muted/10 transition-all cursor-pointer flex flex-col justify-between space-y-3"
+                    >
+                      <div className="relative aspect-video w-full rounded-lg overflow-hidden bg-black/60">
+                        {ad.thumbnailUrl ? (
+                          <img
+                            src={ad.thumbnailUrl}
+                            alt={ad.advertiserName}
+                            className="w-full h-full object-cover group-hover:scale-105 transition"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-zinc-500">
+                            <Play className="h-8 w-8" />
+                          </div>
+                        )}
+                        <span className="absolute top-2 left-2 px-1.5 py-0.5 rounded bg-black/70 text-[9px] font-bold text-white uppercase">
+                          {ad.creativeType || "Vídeo"}
+                        </span>
+                      </div>
+
+                      <div className="space-y-1">
+                        <h5 className="font-semibold text-xs line-clamp-1 group-hover:text-purple-400 transition">
+                          {ad.advertiserName}
+                        </h5>
+                        <p className="text-[11px] text-muted-foreground line-clamp-2">
+                          {ad.copy || "Sem copy descrita"}
+                        </p>
+                      </div>
+
+                      <Button
+                        size="sm"
+                        className="w-full h-7 text-xs bg-purple-600 hover:bg-purple-500 text-white font-medium"
+                      >
+                        Transcrever Este Vídeo
+                        <ArrowRight className="h-3 w-3 ml-1" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </TabsContent>
+
+            {/* Tab 3: YouTube */}
             <TabsContent value="youtube" className="space-y-4 pt-2">
               <form onSubmit={handleTranscribeYouTube} className="flex flex-col sm:flex-row gap-3">
                 <Input
@@ -613,7 +770,7 @@ export default function VslTranscriber() {
               </p>
             </TabsContent>
 
-            {/* Audio Recording Tab */}
+            {/* Tab 4: Audio Recording */}
             <TabsContent value="audio" className="space-y-4 pt-2">
               <div className="p-6 rounded-xl border border-dashed border-border bg-muted/20 flex flex-col items-center justify-center text-center space-y-4">
                 <div
@@ -662,7 +819,7 @@ export default function VslTranscriber() {
               </div>
             </TabsContent>
 
-            {/* Paste Raw Text Tab */}
+            {/* Tab 5: Paste Raw Text */}
             <TabsContent value="paste" className="space-y-4 pt-2">
               <form onSubmit={handleProcessRawText} className="space-y-3">
                 <Textarea
