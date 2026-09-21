@@ -31,6 +31,8 @@ import {
   Image as ImageIcon,
   Layers,
   ArrowRight,
+  Cpu,
+  Cloud,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -53,6 +55,36 @@ interface VaultAd {
   copy?: string;
 }
 
+// Extrai a faixa de áudio de qualquer arquivo de vídeo/áudio e reamostra para 16kHz mono (padrão Whisper)
+async function extractAudioFromMediaFile(
+  fileOrBlob: Blob,
+  onProgress?: (msg: string) => void
+): Promise<Float32Array> {
+  onProgress?.("Decodificando trilha sonora do vídeo...");
+  const arrayBuffer = await fileOrBlob.arrayBuffer();
+  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+  const audioCtx = new AudioCtx();
+
+  const decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+
+  onProgress?.("Reamostrando áudio para alta fidelidade (16kHz)...");
+  // Converte para 16kHz mono para máxima precisão de transcrição
+  const targetSampleRate = 16000;
+  const offlineCtx = new OfflineAudioContext(
+    1,
+    Math.max(1, Math.ceil(decodedBuffer.duration * targetSampleRate)),
+    targetSampleRate
+  );
+
+  const source = offlineCtx.createBufferSource();
+  source.buffer = decodedBuffer;
+  source.connect(offlineCtx.destination);
+  source.start(0);
+
+  const renderedBuffer = await offlineCtx.startRendering();
+  return renderedBuffer.getChannelData(0);
+}
+
 export default function VslTranscriber() {
   const [activeTab, setActiveTab] = useState("gallery");
   const [youtubeUrl, setYoutubeUrl] = useState("");
@@ -66,8 +98,8 @@ export default function VslTranscriber() {
   const [isVideoFile, setIsVideoFile] = useState<boolean>(true);
   const [openAiKey, setOpenAiKey] = useState<string>("");
   const [showKeyInput, setShowKeyInput] = useState<boolean>(false);
-  const [isTranscribingFile, setIsTranscribingFile] = useState<boolean>(false);
-  const [isPlayingSync, setIsPlayingSync] = useState<boolean>(false);
+  const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
+  const [transcribeStatus, setTranscribeStatus] = useState<string>("");
   const videoPlayerRef = useRef<HTMLVideoElement | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
 
@@ -75,7 +107,7 @@ export default function VslTranscriber() {
   const [vaultVideos, setVaultVideos] = useState<VaultAd[]>([]);
   const [isLoadingVault, setIsLoadingVault] = useState<boolean>(true);
 
-  // Áudio ao vivo via Web Speech API
+  // Áudio ao vivo via Web Speech API (Ditado por voz com microfone)
   const [isRecording, setIsRecording] = useState(false);
   const [transcriptAudio, setTranscriptAudio] = useState("");
   const recognitionRef = useRef<any>(null);
@@ -122,7 +154,7 @@ export default function VslTranscriber() {
     }
   }, []);
 
-  // Configura Web Speech API para gravação de áudio e sincronização
+  // Configura Web Speech API para gravação de microfone
   useEffect(() => {
     if (typeof window !== "undefined") {
       const SpeechRecognition =
@@ -148,12 +180,10 @@ export default function VslTranscriber() {
         recognition.onerror = (event: any) => {
           console.error("Speech recognition error:", event.error);
           setIsRecording(false);
-          setIsPlayingSync(false);
         };
 
         recognition.onend = () => {
           setIsRecording(false);
-          setIsPlayingSync(false);
         };
 
         recognitionRef.current = recognition;
@@ -176,6 +206,8 @@ export default function VslTranscriber() {
     setIsVideoFile(file.type.startsWith("video/") || !file.type.startsWith("audio/"));
     setErrorMessage(null);
     setTranscriptAudio("");
+    setFullTranscript("");
+    setPillars(null);
   };
 
   const handleSelectFromVault = (ad: VaultAd) => {
@@ -190,6 +222,8 @@ export default function VslTranscriber() {
     setIsVideoFile(true);
     setErrorMessage(null);
     setTranscriptAudio("");
+    setFullTranscript("");
+    setPillars(null);
     setActiveTab("gallery");
   };
 
@@ -200,24 +234,110 @@ export default function VslTranscriber() {
     }
   };
 
-  // Transcrição de arquivo via API (OpenAI Whisper)
-  const handleTranscribeWithWhisper = async () => {
+  // ==============================================================
+  // TRANSCRIÇÃO REAL DA VOZ DO VÍDEO (SPEECH-TO-TEXT DIRETO NO NAVEGADOR)
+  // Converte a voz que está sendo falada no vídeo em texto palavra por palavra!
+  // ==============================================================
+  const handleTranscribeAudioTrackDirectly = async () => {
     if (!selectedFile && !filePreviewUrl) return;
 
-    setIsTranscribingFile(true);
+    setIsTranscribing(true);
     setErrorMessage(null);
+    setTranscribeStatus("Iniciando extração do áudio do vídeo...");
+
+    try {
+      let mediaBlob: Blob | null = selectedFile;
+
+      // Se for uma URL remota (do cofre de ofertas), faz o fetch do blob
+      if (!mediaBlob && filePreviewUrl) {
+        setTranscribeStatus("Baixando áudio da oferta salva...");
+        const res = await fetch(filePreviewUrl);
+        mediaBlob = await res.blob();
+      }
+
+      if (!mediaBlob) {
+        throw new Error("Nenhum arquivo de vídeo disponível para transcrever.");
+      }
+
+      // 1. Extrai a faixa de áudio e transforma em dados PCM 16kHz
+      const audioData = await extractAudioFromMediaFile(mediaBlob, (msg) => {
+        setTranscribeStatus(msg);
+      });
+
+      setTranscribeStatus("Carregando modelo de IA Whisper (Hugging Face / OpenAI)...");
+
+      // 2. Importa Transformers.js dinamicamente no cliente
+      const { pipeline, env } = await import("@xenova/transformers");
+      env.allowLocalModels = false;
+      env.useBrowserCache = true;
+
+      // Utiliza whisper-tiny em português (rápido, leve e com 0 custo)
+      const transcriber = await pipeline(
+        "automatic-speech-recognition",
+        "Xenova/whisper-tiny",
+        {
+          progress_callback: (progress: any) => {
+            if (progress.status === "progress") {
+              const pct = Math.round((progress.loaded / progress.total) * 100) || 0;
+              setTranscribeStatus(`Baixando motor de fala: ${pct}%`);
+            } else if (progress.status === "ready") {
+              setTranscribeStatus("Motor de IA pronto! Transcrevendo fala do vídeo...");
+            }
+          },
+        }
+      );
+
+      setTranscribeStatus("Transcrevendo a voz falada no vídeo para texto...");
+
+      // 3. Executa a transcrição
+      const output = await transcriber(audioData, {
+        language: "portuguese",
+        task: "transcribe",
+        chunk_length_s: 30,
+        stride_length_s: 5,
+      });
+
+      const extractedSpokenText = Array.isArray(output)
+        ? output.map((item: any) => item.text).join(" ")
+        : (output as any).text || "";
+
+      if (!extractedSpokenText || extractedSpokenText.trim().length === 0) {
+        throw new Error(
+          "Não foi possível identificar falas claras no áudio deste vídeo. Verifique se o vídeo possui locução audível."
+        );
+      }
+
+      setTranscribeStatus("Transcrição concluída com sucesso!");
+      structureTranscript(extractedSpokenText, title || selectedFile?.name);
+    } catch (err: any) {
+      console.error("Erro na transcrição local:", err);
+      setErrorMessage(
+        err.message ||
+          "Erro ao transcrever a voz do vídeo no navegador. Se o vídeo for muito longo, experimente utilizar a Opção de IA na Nuvem (Whisper API)."
+      );
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  // Transcrição de arquivo via API na Nuvem (OpenAI Whisper)
+  const handleTranscribeWithWhisperApi = async () => {
+    if (!selectedFile && !filePreviewUrl) return;
+
+    setIsTranscribing(true);
+    setErrorMessage(null);
+    setTranscribeStatus("Enviando arquivo para API Whisper na Nuvem...");
 
     try {
       let fileToSend: File | Blob | null = selectedFile;
 
-      // Se for uma URL remota do cofre, busca o blob primeiro
       if (!fileToSend && filePreviewUrl) {
         const fetchedBlob = await fetch(filePreviewUrl).then((r) => r.blob());
         fileToSend = new File([fetchedBlob], `${title || "video"}.mp4`, { type: "video/mp4" });
       }
 
       if (!fileToSend) {
-        throw new Error("Nenhum arquivo ou URL válida para transcrever.");
+        throw new Error("Nenhum arquivo válido para transcrever.");
       }
 
       const formData = new FormData();
@@ -240,41 +360,12 @@ export default function VslTranscriber() {
         throw new Error(data.error || "Falha ao processar arquivo no servidor.");
       }
 
+      setTranscribeStatus("Transcrição da Nuvem concluída!");
       structureTranscript(data.transcript, title || selectedFile?.name);
     } catch (err: any) {
-      setErrorMessage(err.message || "Erro ao processar arquivo.");
+      setErrorMessage(err.message || "Erro ao processar arquivo na nuvem.");
     } finally {
-      setIsTranscribingFile(false);
-    }
-  };
-
-  // Transcrição por reprodução do vídeo sincronizado com Web Speech
-  const togglePlaySync = () => {
-    if (!recognitionRef.current) {
-      alert("Seu navegador não suporta reconhecimento de voz direto. Recomendamos o Google Chrome ou Edge.");
-      return;
-    }
-
-    const mediaElement = isVideoFile ? videoPlayerRef.current : audioPlayerRef.current;
-    if (!mediaElement) return;
-
-    if (isPlayingSync) {
-      mediaElement.pause();
-      recognitionRef.current.stop();
-      setIsPlayingSync(false);
-    } else {
-      mediaElement.play();
-      try {
-        recognitionRef.current.start();
-      } catch {}
-      setIsPlayingSync(true);
-
-      mediaElement.onended = () => {
-        setIsPlayingSync(false);
-        try {
-          recognitionRef.current.stop();
-        } catch {}
-      };
+      setIsTranscribing(false);
     }
   };
 
@@ -365,7 +456,7 @@ export default function VslTranscriber() {
 
   const handleApplyAudioTranscript = () => {
     if (!transcriptAudio.trim()) return;
-    structureTranscript(transcriptAudio, title || selectedFile?.name || "Gravação de Áudio");
+    structureTranscript(transcriptAudio, title || selectedFile?.name || "Gravação de Microfone");
   };
 
   const copyToClipboard = async (text: string, key: string) => {
@@ -380,12 +471,12 @@ export default function VslTranscriber() {
 
   const downloadTextFile = () => {
     if (!fullTranscript) return;
-    const content = `=== TRANSCRIÇÃO VSL: ${title} ===\n\n` +
+    const content = `=== TRANSCRIÇÃO DA FALA DO VÍDEO: ${title} ===\n\n` +
       `[1. GANCHO INICIAL]\n${pillars?.hook || ""}\n\n` +
       `[2. HISTÓRIA & MECANISMO ÚNICO]\n${pillars?.storyMechanism || ""}\n\n` +
       `[3. A OFERTA]\n${pillars?.offer || ""}\n\n` +
       `[4. CHAMADA PARA AÇÃO & FECHAMENTO]\n${pillars?.cta || ""}\n\n` +
-      `=== TRANSCRIÇÃO COMPLETA ===\n${fullTranscript}`;
+      `=== TEXTO COMPLETO FALADO NO VÍDEO ===\n${fullTranscript}`;
 
     const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
     const downloadUrl = window.URL.createObjectURL(blob);
@@ -412,14 +503,14 @@ export default function VslTranscriber() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-3xl font-bold tracking-tight">Transcritor de VSL & Anúncios</h1>
+            <h1 className="text-3xl font-bold tracking-tight">Transcritor de Voz de VSL & Vídeos</h1>
             <Badge variant="outline" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/30">
-              Vídeos da Galeria & Arquivos
+              Voz Falada para Texto
             </Badge>
           </div>
           <p className="text-muted-foreground mt-2 max-w-2xl">
-            Suba vídeos da sua <strong>Galeria de Fotos/Vídeos</strong> ou arquivos do computador (.mp4, .mov, .webm),
-            selecione criativos salvos no <strong>Cofre</strong> ou importe do YouTube para dissecar nos 4 pilares de conversão.
+            Converte a <strong>voz falada no vídeo</strong> em texto escrito completo palavra por palavra.
+            Suba vídeos da sua <strong>Galeria</strong>, selecione criativos do seu <strong>Cofre</strong> ou use links do YouTube.
           </p>
         </div>
       </div>
@@ -427,9 +518,9 @@ export default function VslTranscriber() {
       {/* Input Selection Tabs */}
       <Card className="border-border/60 shadow-lg">
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg">Selecione o Método de Entrada</CardTitle>
+          <CardTitle className="text-lg">Escolha o Vídeo para Transcrever a Fala</CardTitle>
           <CardDescription>
-            Escolha um vídeo da sua galeria, do cofre de ofertas, link do YouTube ou gravação direta.
+            O sistema extrai a voz falada do locutor e organiza o texto nos 4 pilares: Gancho, História, Mecanismo e Oferta.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -449,7 +540,7 @@ export default function VslTranscriber() {
               </TabsTrigger>
               <TabsTrigger value="audio" className="gap-1.5 text-xs sm:text-sm">
                 <Mic className="h-4 w-4 text-blue-500" />
-                Gravar / Ditado
+                Ditar no Microfone
               </TabsTrigger>
             </TabsList>
 
@@ -461,18 +552,19 @@ export default function VslTranscriber() {
                     <Film className="h-8 w-8" />
                   </div>
                   <div className="space-y-1">
-                    <h4 className="font-semibold text-base">Subir Vídeo da Galeria ou Computador</h4>
+                    <h4 className="font-semibold text-base">Subir Vídeo da Galeria ou Arquivos</h4>
                     <p className="text-xs text-muted-foreground max-w-md">
-                      Acesse a galeria de vídeos do seu celular ou arquivos do PC (.mp4, .mov, .webm, .mkv, .avi, .mp3).
+                      Selecione qualquer vídeo da galeria (.mp4, .mov, .webm, .mkv, .avi) ou áudio (.mp3, .wav).
+                      A voz falada será convertida diretamente em texto.
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center justify-center gap-3">
                     <label
                       htmlFor="vsl-gallery-upload"
-                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm cursor-pointer shadow-md transition-all"
+                      className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm cursor-pointer shadow-lg transition-all"
                     >
                       <ImageIcon className="h-4 w-4" />
-                      Abrir Galeria / Escolher Vídeo
+                      Escolher Vídeo da Galeria
                     </label>
                     <input
                       id="vsl-gallery-upload"
@@ -487,10 +579,10 @@ export default function VslTranscriber() {
                         type="button"
                         variant="outline"
                         onClick={() => setActiveTab("vault")}
-                        className="gap-2 text-xs h-10 border-purple-500/30 text-purple-300 hover:bg-purple-500/10"
+                        className="gap-2 text-xs h-11 border-purple-500/30 text-purple-300 hover:bg-purple-500/10 rounded-xl"
                       >
                         <Layers className="h-4 w-4 text-purple-400" />
-                        Ver Vídeos do Cofre ({vaultVideos.length})
+                        Escolher do Cofre ({vaultVideos.length})
                       </Button>
                     )}
                   </div>
@@ -506,7 +598,7 @@ export default function VslTranscriber() {
                       <div>
                         <h4 className="font-semibold text-sm line-clamp-1">{title || selectedFile?.name || "Vídeo Selecionado"}</h4>
                         <p className="text-xs text-muted-foreground font-mono">
-                          {selectedFile ? `${formatFileSize(selectedFile.size)} • ${selectedFile.type}` : "Vídeo Carregado da Galeria"}
+                          {selectedFile ? `${formatFileSize(selectedFile.size)} • ${selectedFile.type}` : "Vídeo Carregado"}
                         </p>
                       </div>
                     </div>
@@ -544,47 +636,51 @@ export default function VslTranscriber() {
                     )}
                   </div>
 
-                  {/* Ações de Transcrição */}
+                  {/* Botões de Ação de Transcrição */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                    {/* Opção 1: Reconhecimento de Voz ao Vivo (Gratuito) */}
-                    <div className="p-5 rounded-xl border border-border bg-card/60 flex flex-col justify-between space-y-4">
+                    {/* Opção 1: Transcrição da Voz Direto no Navegador (IA Whisper Local - 100% Gratuito) */}
+                    <div className="p-5 rounded-xl border border-emerald-500/30 bg-emerald-500/5 flex flex-col justify-between space-y-4">
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
-                          <h5 className="font-semibold text-sm">Opção 1: Reprodução com Voz</h5>
+                          <Cpu className="h-4 w-4 text-emerald-400" />
+                          <h5 className="font-semibold text-sm">Transcrever Fala do Vídeo</h5>
                           <Badge variant="outline" className="text-[10px] text-emerald-400 bg-emerald-500/10 border-emerald-500/30">
-                            100% Gratuito
+                            100% Gratuito & Direto
                           </Badge>
                         </div>
-                        <p className="text-xs text-muted-foreground">
-                          O navegador reproduz o áudio do vídeo e transcreve a fala em tempo real via microfone ou som do sistema.
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Converte a fala falada no vídeo diretamente em texto em português através de IA Whisper. Sem limites e sem necessidade de chave de API.
                         </p>
                       </div>
 
                       <Button
-                        onClick={togglePlaySync}
-                        variant={isPlayingSync ? "destructive" : "default"}
-                        className="w-full gap-2 font-semibold shadow-sm"
+                        onClick={handleTranscribeAudioTrackDirectly}
+                        disabled={isTranscribing}
+                        className="w-full h-11 gap-2 font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-md text-sm"
                       >
-                        {isPlayingSync ? (
+                        {isTranscribing ? (
                           <>
-                            <Pause className="h-4 w-4" /> Pausar Transcrição do Vídeo
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Transcrevendo Fala...
                           </>
                         ) : (
                           <>
-                            <Play className="h-4 w-4" /> Iniciar Reprodução & Transcrição
+                            <Sparkles className="h-4 w-4" />
+                            Transcrever Voz do Vídeo para Texto
                           </>
                         )}
                       </Button>
                     </div>
 
-                    {/* Opção 2: Transcrição em Segundo Plano com IA (Whisper) */}
+                    {/* Opção 2: Transcrição em Segundo Plano com IA na Nuvem (Whisper API) */}
                     <div className="p-5 rounded-xl border border-border bg-card/60 flex flex-col justify-between space-y-4">
                       <div className="space-y-1">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <h5 className="font-semibold text-sm">Opção 2: IA Whisper</h5>
+                            <Cloud className="h-4 w-4 text-blue-400" />
+                            <h5 className="font-semibold text-sm">Transcrição em Alta Velocidade</h5>
                             <Badge variant="outline" className="text-[10px] text-blue-400 bg-blue-500/10 border-blue-500/30">
-                              Automático
+                              Nuvem
                             </Badge>
                           </div>
                           <button
@@ -593,11 +689,11 @@ export default function VslTranscriber() {
                             className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
                           >
                             <Key className="h-3 w-3" />
-                            {openAiKey ? "Chave salva" : "Configurar API Key"}
+                            {openAiKey ? "Chave configurada" : "Chave OpenAI"}
                           </button>
                         </div>
-                        <p className="text-xs text-muted-foreground">
-                          Processamento rápido direto do arquivo sem precisar reproduzi-lo na caixa de som.
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Ideal para vídeos muito longos (+20 minutos). Envia o arquivo para a API da OpenAI.
                         </p>
                       </div>
 
@@ -610,50 +706,33 @@ export default function VslTranscriber() {
                             onChange={(e) => handleOpenAiKeyChange(e.target.value)}
                             className="h-8 text-xs font-mono"
                           />
-                          <p className="text-[10px] text-muted-foreground">
-                            Sua chave fica salva apenas no seu navegador para uso contínuo.
-                          </p>
                         </div>
                       )}
 
                       <Button
-                        onClick={handleTranscribeWithWhisper}
-                        disabled={isTranscribingFile}
-                        className="w-full gap-2 font-semibold bg-blue-600 hover:bg-blue-500 text-white shadow-sm"
+                        onClick={handleTranscribeWithWhisperApi}
+                        disabled={isTranscribing}
+                        variant="outline"
+                        className="w-full h-11 gap-2 font-semibold text-sm border-blue-500/30 text-blue-400 hover:bg-blue-500/10"
                       >
-                        {isTranscribingFile ? (
+                        {isTranscribing ? (
                           <>
-                            <Loader2 className="h-4 w-4 animate-spin" /> Processando com Whisper...
+                            <Loader2 className="h-4 w-4 animate-spin" /> Processando...
                           </>
                         ) : (
                           <>
-                            <Sparkles className="h-4 w-4" /> Transcrever com IA Whisper
+                            <Cloud className="h-4 w-4" /> Transcrever via Nuvem (Whisper API)
                           </>
                         )}
                       </Button>
                     </div>
                   </div>
 
-                  {/* Texto Transcrito em Tempo Real */}
-                  {transcriptAudio && (
-                    <div className="p-4 rounded-xl border border-border bg-muted/20 space-y-3 mt-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          Texto Capturado do Vídeo:
-                        </span>
-                        <Button
-                          size="sm"
-                          onClick={handleApplyAudioTranscript}
-                          className="h-7 text-xs bg-emerald-600 hover:bg-emerald-500 text-white"
-                        >
-                          <Sparkles className="h-3.5 w-3.5 mr-1" />
-                          Estruturar nos 4 Pilares
-                        </Button>
-                      </div>
-                      <p className="text-xs font-mono text-foreground leading-relaxed max-h-40 overflow-auto">
-                        {transcriptAudio}
-                      </p>
+                  {/* Status do Processamento */}
+                  {transcribeStatus && (
+                    <div className="p-3 rounded-lg bg-muted/40 border border-border text-xs flex items-center gap-2 font-mono text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
+                      <span>{transcribeStatus}</span>
                     </div>
                   )}
                 </div>
@@ -665,7 +744,7 @@ export default function VslTranscriber() {
               <div>
                 <h4 className="text-sm font-semibold mb-1">Vídeos Salvos no seu Cofre de Ofertas</h4>
                 <p className="text-xs text-muted-foreground">
-                  Selecione qualquer criativo ou VSL que você salvou pelo FluxoMiner para transcrever e dissecar imediatamente.
+                  Selecione qualquer anúncio minerado para extrair a voz falada do vídeo e transformá-la em texto.
                 </p>
               </div>
 
@@ -766,7 +845,7 @@ export default function VslTranscriber() {
                 </Button>
               </form>
               <p className="text-xs text-muted-foreground">
-                Funciona com qualquer vídeo público ou não listado que possua legendas ou áudio detectável.
+                Extrai automaticamente a fala de vídeos públicos ou não listados do YouTube.
               </p>
             </TabsContent>
 
@@ -785,11 +864,10 @@ export default function VslTranscriber() {
 
                 <div className="space-y-1">
                   <h4 className="font-semibold text-base">
-                    {isRecording ? "Gravando áudio em tempo real..." : "Transcrever por Reconhecimento de Voz"}
+                    {isRecording ? "Gravando microfone em tempo real..." : "Ditado por Voz com Microfone"}
                   </h4>
                   <p className="text-xs text-muted-foreground max-w-md">
-                    Clique no botão abaixo e fale ou toque o áudio da VSL perto do microfone.
-                    A transcrição em português será gerada instantaneamente.
+                    Fale no microfone para transcrever ideias ou narrar o roteiro. O texto em português é gerado em tempo real.
                   </p>
                 </div>
 
@@ -800,7 +878,7 @@ export default function VslTranscriber() {
                     className="gap-2 font-semibold"
                   >
                     {isRecording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                    {isRecording ? "Parar Gravação" : "Começar a Falar / Tocar Áudio"}
+                    {isRecording ? "Parar Gravação" : "Começar a Falar no Microfone"}
                   </Button>
 
                   {transcriptAudio && !isRecording && (
@@ -817,28 +895,6 @@ export default function VslTranscriber() {
                   </div>
                 )}
               </div>
-            </TabsContent>
-
-            {/* Tab 5: Paste Raw Text */}
-            <TabsContent value="paste" className="space-y-4 pt-2">
-              <form onSubmit={handleProcessRawText} className="space-y-3">
-                <Textarea
-                  placeholder="Cole aqui o texto ou roteiro bruto copiado de outra ferramenta (CapCut, Descript, Otter, Whisper ou bloco de notas)..."
-                  value={rawText}
-                  onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRawText(e.target.value)}
-                  className="min-h-[160px] font-mono text-sm leading-relaxed"
-                />
-                <div className="flex justify-end">
-                  <Button
-                    type="submit"
-                    disabled={!rawText.trim()}
-                    className="bg-blue-600 hover:bg-blue-500 text-white font-semibold"
-                  >
-                    <Sparkles className="mr-2 h-4 w-4" />
-                    Organizar nos 4 Pilares de VSL
-                  </Button>
-                </div>
-              </form>
             </TabsContent>
           </Tabs>
 
@@ -860,13 +916,13 @@ export default function VslTranscriber() {
             <CardContent className="p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
               <div>
                 <h3 className="font-semibold text-base">{title}</h3>
-                <p className="text-xs text-muted-foreground">Roteiro dissecado em blocos lógicos de conversão.</p>
+                <p className="text-xs text-muted-foreground">Texto completo da fala extraído e dissecado em blocos lógicos.</p>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="secondary" className="gap-1 font-mono text-xs">
                   <FileText className="h-3.5 w-3.5" />
-                  {totalWords} palavras
+                  {totalWords} palavras faladas
                 </Badge>
                 <Badge variant="secondary" className="gap-1 text-xs">
                   <Clock className="h-3.5 w-3.5" />
@@ -879,7 +935,7 @@ export default function VslTranscriber() {
                   className="h-8 gap-1.5 text-xs ml-2"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Baixar Roteiro (.txt)
+                  Baixar Roteiro Falado (.txt)
                 </Button>
                 <Button
                   size="sm"
@@ -888,7 +944,7 @@ export default function VslTranscriber() {
                   className="h-8 gap-1.5 text-xs"
                 >
                   {copiedKey === "full" ? <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> : <Copy className="h-3.5 w-3.5" />}
-                  {copiedKey === "full" ? "Copiado!" : "Copiar Tudo"}
+                  {copiedKey === "full" ? "Copiado!" : "Copiar Fala Completa"}
                 </Button>
               </div>
             </CardContent>
@@ -904,10 +960,10 @@ export default function VslTranscriber() {
                     <span className="p-1.5 rounded-md bg-red-500/10 text-red-400">
                       <Flame className="h-4 w-4" />
                     </span>
-                    <CardTitle className="text-base">1. O Gancho (Hook)</CardTitle>
+                    <CardTitle className="text-base">1. O Gancho Falado (Hook)</CardTitle>
                   </div>
                   <CardDescription className="text-xs mt-1">
-                    Primeiros 15-30 segundos para prender a atenção e quebrar o padrão.
+                    Primeiros 15-30 segundos falados no vídeo para prender a atenção.
                   </CardDescription>
                 </div>
                 <Button
@@ -937,7 +993,7 @@ export default function VslTranscriber() {
                     <CardTitle className="text-base">2. História & Mecanismo Único</CardTitle>
                   </div>
                   <CardDescription className="text-xs mt-1">
-                    A dor oculta, a jornada de descoberta e o segredo por trás do método.
+                    A dor oculta explicada pelo locutor e o segredo por trás do método.
                   </CardDescription>
                 </div>
                 <Button
@@ -964,10 +1020,10 @@ export default function VslTranscriber() {
                     <span className="p-1.5 rounded-md bg-emerald-500/10 text-emerald-400">
                       <ShieldCheck className="h-4 w-4" />
                     </span>
-                    <CardTitle className="text-base">3. A Oferta Irresistível</CardTitle>
+                    <CardTitle className="text-base">3. A Oferta Apresentada</CardTitle>
                   </div>
                   <CardDescription className="text-xs mt-1">
-                    O produto, empilhamento de valor, bônus e entregáveis imediatos.
+                    O produto revelado no vídeo, entregáveis e empilhamento de valor.
                   </CardDescription>
                 </div>
                 <Button
@@ -994,10 +1050,10 @@ export default function VslTranscriber() {
                     <span className="p-1.5 rounded-md bg-amber-500/10 text-amber-400">
                       <Send className="h-4 w-4" />
                     </span>
-                    <CardTitle className="text-base">4. CTA, Garantia & Fechamento</CardTitle>
+                    <CardTitle className="text-base">4. CTA & Chamada para Ação</CardTitle>
                   </div>
                   <CardDescription className="text-xs mt-1">
-                    Urgência, escassez, eliminação de risco e chamada imperativa para compra.
+                    Garantia, urgência e comando final de compra falados pelo locutor.
                   </CardDescription>
                 </div>
                 <Button
@@ -1022,10 +1078,10 @@ export default function VslTranscriber() {
             <div className="space-y-1">
               <h4 className="font-semibold text-sm flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-primary" />
-                Deseja modelar esta VSL e criar suas próprias variações?
+                Deseja modelar a fala desta VSL e criar suas próprias variações?
               </h4>
               <p className="text-xs text-muted-foreground">
-                Copie o mecanismo e os ganchos identificados acima e acesse o Gerador de Copy para gerar headlines, scripts e e-mails originais.
+                Copie os ganchos e argumentos falados acima e vá para o Gerador de Copy para criar versões exclusivas.
               </p>
             </div>
             <Button
