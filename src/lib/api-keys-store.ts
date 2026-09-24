@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
+import { supabase, isSupabaseConfigured } from "./supabase";
 
 export interface ApiKey {
   key: string;
@@ -54,7 +55,33 @@ async function ensureKeysFile(): Promise<void> {
   }
 }
 
+function mapDbRowToApiKey(row: any): ApiKey {
+  return {
+    key: row.key,
+    userName: row.user_name || "Membro",
+    userEmail: row.user_email || "",
+    role: row.role || "miner",
+    createdAt: row.created_at || new Date().toISOString(),
+    lastUsedAt: row.last_used_at || undefined,
+  };
+}
+
 export async function getAllApiKeys(): Promise<ApiKey[]> {
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("api_keys")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (!error && Array.isArray(data)) {
+        return data.map(mapDbRowToApiKey);
+      }
+    } catch (err) {
+      console.error("Erro ao ler chaves do Supabase:", err);
+    }
+  }
+
   await ensureKeysFile();
   try {
     const raw = await fs.readFile(KEYS_FILE, "utf-8");
@@ -71,9 +98,6 @@ export async function createApiKey(
   userEmail?: string,
   role: "admin" | "miner" = "miner"
 ): Promise<ApiKey> {
-  await ensureKeysFile();
-  const keys = await getAllApiKeys();
-
   // Gera chave segura no formato fo_live_<user>_<hash>
   const slug = userName
     .toLowerCase()
@@ -83,21 +107,50 @@ export async function createApiKey(
     .slice(0, 10);
   const randomHex = crypto.randomBytes(4).toString("hex");
   const key = `fo_live_${slug}_${randomHex}`;
+  const now = new Date().toISOString();
 
   const newKey: ApiKey = {
     key,
     userName,
     userEmail: userEmail || "",
     role,
-    createdAt: new Date().toISOString(),
+    createdAt: now,
   };
 
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { error } = await supabase.from("api_keys").insert({
+        key,
+        user_name: userName,
+        user_email: userEmail || "",
+        role,
+        created_at: now,
+      });
+
+      if (!error) return newKey;
+      console.error("Erro ao criar chave no Supabase:", error.message);
+    } catch (err) {
+      console.error("Exceção ao criar chave no Supabase:", err);
+    }
+  }
+
+  await ensureKeysFile();
+  const keys = await getAllApiKeys();
   keys.unshift(newKey);
   await fs.writeFile(KEYS_FILE, JSON.stringify(keys, null, 2), "utf-8");
   return newKey;
 }
 
 export async function deleteApiKey(key: string): Promise<boolean> {
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { error } = await supabase.from("api_keys").delete().eq("key", key);
+      if (!error) return true;
+    } catch (err) {
+      console.error("Erro ao deletar chave no Supabase:", err);
+    }
+  }
+
   await ensureKeysFile();
   const keys = await getAllApiKeys();
   const filtered = keys.filter((k) => k.key !== key);
@@ -110,11 +163,33 @@ export async function deleteApiKey(key: string): Promise<boolean> {
 export async function validateApiKey(keyToValidate: string): Promise<ApiKey | null> {
   if (!keyToValidate) return null;
   const cleanKey = keyToValidate.replace(/^Bearer\s+/i, "").trim();
-  const keys = await getAllApiKeys();
 
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("api_keys")
+        .select("*")
+        .eq("key", cleanKey)
+        .maybeSingle();
+
+      if (!error && data) {
+        const found = mapDbRowToApiKey(data);
+        const now = new Date().toISOString();
+        supabase
+          .from("api_keys")
+          .update({ last_used_at: now })
+          .eq("key", cleanKey)
+          .then();
+        return found;
+      }
+    } catch (err) {
+      console.error("Erro ao validar chave no Supabase:", err);
+    }
+  }
+
+  const keys = await getAllApiKeys();
   const found = keys.find((k) => k.key === cleanKey);
   if (found) {
-    // Atualiza lastUsedAt silenciosamente
     found.lastUsedAt = new Date().toISOString();
     fs.writeFile(KEYS_FILE, JSON.stringify(keys, null, 2), "utf-8").catch(() => {});
     return found;

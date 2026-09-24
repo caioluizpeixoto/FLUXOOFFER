@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Home, Layers, Video, FileText, Download, Quote, Settings } from "lucide-react";
+import { Home, Layers, Video, FileText, Download, Quote, Settings, Flame } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -21,6 +21,11 @@ const items = [
     title: "Dashboard",
     url: "/",
     icon: Home,
+  },
+  {
+    title: "Page Builder (Novo)",
+    url: "/tools/page-builder",
+    icon: Flame,
   },
   {
     title: "Baixador de Páginas",

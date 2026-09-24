@@ -48,6 +48,16 @@ export default function Home() {
 
   const tools: ToolCardInfo[] = [
     {
+      title: "Page Builder Low-Ticket",
+      description: "Crie e faça deploy de landing pages agressivas com VSL, lógica de upsell e tracking em 1 clique.",
+      url: "/tools/page-builder",
+      icon: Flame,
+      color: "text-red-500",
+      badge: "Alta Conversão",
+      badgeColor: "bg-red-500/20 text-red-400 border-red-500/40 font-bold",
+      realStat: "VSL + Upsell + Deploy Vercel",
+    },
+    {
       title: "Baixador de Páginas",
       description: "Clone páginas de vendas e advertoriais limpos de pixels de rastreamento com visual preservado.",
       url: "/tools/page-downloader",

@@ -2,10 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAllOffers, saveOffer } from "@/lib/offers-store";
 import { validateApiKey } from "@/lib/api-keys-store";
 
+export const dynamic = "force-dynamic";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
 };
 
 export async function OPTIONS() {
